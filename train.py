@@ -1,64 +1,19 @@
-import sys
-import warnings
-from pathlib import Path
-from argparse import ArgumentParser
-warnings.filterwarnings('ignore')
-
-# torch and lightning imports
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.models as models
-from torch.optim import SGD, Adam
-from torchvision import transforms
-from torchvision.datasets import ImageFolder
-from torch.utils.data import DataLoader
-import pytorch_lightning as pl
+import torch.optim as optim
+import torchvision.datasets as datasets
+import torchvision.transforms as transforms
+from torch.optim.lr_scheduler import StepLR
 from torchsampler import ImbalancedDatasetSampler
+from ResNet import ResNet50
 
+train_path = "./input/train"
+test_path = "./input/val"
+batch_size = 256
+lr = 1e-3
 
-# Here we define a new class to turn the ResNet model that we want to use as a feature extractor
-# into a pytorch-lightning module so that we can take advantage of lightning's Trainer object.
-# We aim to make it a little more general by allowing users to define the number of prediction classes.
-class ResNetClassifier(pl.LightningModule):
-    def __init__(self, num_classes=2, resnet_version=50,
-                train_path='input/train', vld_path='input/val', test_path=None, 
-                optimizer='adam', lr=1e-3, batch_size=16,
-                transfer=False, tune_fc_only=True):
-        super().__init__()
-
-        self.__dict__.update(locals())
-        resnets = {
-            18: models.resnet18, 34: models.resnet34,
-            50: models.resnet50, 101: models.resnet101,
-            152: models.resnet152
-        }
-        optimizers = {'adam': Adam, 'sgd': SGD}
-        self.optimizer = optimizers[optimizer]
-        #instantiate loss criterion
-        self.criterion = nn.BCEWithLogitsLoss() if num_classes == 2 else nn.CrossEntropyLoss()
-        # Using a pretrained ResNet backbone
-        self.resnet_model = resnets[resnet_version](pretrained=transfer)
-        # Replace old FC layer with Identity so we can train our own
-        linear_size = list(self.resnet_model.children())[-1].in_features
-        # replace final layer for fine tuning
-        self.resnet_model.fc = nn.Linear(linear_size, num_classes)
-
-        if tune_fc_only: # option to only tune the fully-connected layers
-            for child in list(self.resnet_model.children())[:-1]:
-                for param in child.parameters():
-                    param.requires_grad = False
-
-    def forward(self, X):
-        return self.resnet_model(X)
-
-    def configure_optimizers(self):
-        return self.optimizer(self.parameters(), lr=self.lr)
-    
-    def train_dataloader(self):
-        # values here are specific to pneumonia dataset and should be changed for custom data
-        transform = transforms.Compose([
-                transforms.Resize((500,500)),
+train_transform = transforms.Compose([
+                transforms.Resize((224,224)),
                 transforms.RandomHorizontalFlip(0.3),
                 transforms.RandomVerticalFlip(0.3),
                 transforms.RandomApply([
@@ -66,111 +21,95 @@ class ResNetClassifier(pl.LightningModule):
                 ]),
                 transforms.ToTensor(),
                 transforms.Normalize((0.48232,), (0.23051,))
-        ])
-        img_train = ImageFolder(self.train_path, transform=transform)
-        return DataLoader(img_train,sampler=ImbalancedDatasetSampler(img_train), batch_size=self.batch_size)
-    
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        preds = self(x)
-        if self.num_classes == 2:
-            y = F.one_hot(y, num_classes=2).float()
-        
-        loss = self.criterion(preds, y)
-        acc = (torch.argmax(y,1) == torch.argmax(preds,1)) \
-                .type(torch.FloatTensor).mean()
-        # perform logging
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        self.log("train_acc", acc, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        return loss
+])
 
-    def val_dataloader(self):
-        # values here are specific to pneumonia dataset and should be changed for custom data
-        transform = transforms.Compose([
-                transforms.Resize((500,500)),
+transform = transforms.Compose([
+                transforms.Resize((224,224)),
                 transforms.ToTensor(),
                 transforms.Normalize((0.48232,), (0.23051,))
         ])
-        
-        img_val = ImageFolder(self.vld_path, transform=transform)
-        
-        return DataLoader(img_val, sampler=ImbalancedDatasetSampler(img_val),batch_size=1)
-    
-    def validation_step(self, batch, batch_idx):
-        x, y = batch
-        preds = self(x)
-        if self.num_classes == 2:
-            y = F.one_hot(y, num_classes=2).float()
-        
-        loss = self.criterion(preds, y)
-        acc = (torch.argmax(y,1) == torch.argmax(preds,1)) \
-                .type(torch.FloatTensor).mean()
-        # perform logging
-        self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)
-        self.log("val_acc", acc, on_epoch=True, prog_bar=True, logger=True)
+
+train_dataset = datasets.ImageFolder(root=train_path, transform=train_transform)
+test_dataset = datasets.ImageFolder(test_path, transform=transform)
+
+train_dataloader = torch.utils.data.DataLoader(
+    train_dataset,
+    sampler=ImbalancedDatasetSampler(train_dataset),
+    batch_size=batch_size,
+)
+
+test_dataloader = torch.utils.data.DataLoader(
+    test_dataset,
+    sampler=ImbalancedDatasetSampler(test_dataset),
+    batch_size=batch_size,
+)
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+#device = 'cpu'
+print(f'using device : {device}')
+
+model = ResNet50(num_classes=2).to(device)
+# print(model)
+
+num_data = 643 + 424
+w_horapa = 643/num_data
+w_kapao = 424/num_data
+class_weight = [w_horapa, w_kapao]
+class_weight = torch.FloatTensor(class_weight)
+
+# criterion
+# criterion = nn.BCEWithLogitsLoss(weight=class_weight)
+criterion = nn.CrossEntropyLoss(weight=class_weight).to(device)
+
+# optimizer
+optimizer = optim.Adam(model.parameters(), lr=lr)
+# scheduler
+gamma = 0.7
+scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
 
 
-    def test_dataloader(self):
-        # values here are specific to pneumonia dataset and should be changed for custom data
-        transform = transforms.Compose([
-                transforms.Resize((500,500)),
-                transforms.ToTensor(),
-                transforms.Normalize((0.48232,), (0.23051,))
-        ])
-        
-        img_test = ImageFolder(self.test_path, transform=transform)
-        
-        return DataLoader(img_test, sampler=ImbalancedDatasetSampler(img_test), batch_size=1)
-    
-    def test_step(self, batch, batch_idx):
-        x, y = batch
-        preds = self(x)
-        if self.num_classes == 2:
-            y = F.one_hot(y, num_classes=2).float()
-        
-        loss = self.criterion(preds, y)
-        acc = (torch.argmax(y,1) == torch.argmax(preds,1)) \
-                .type(torch.FloatTensor).mean()
-        # perform logging
-        self.log("test_loss", loss, on_step=True, prog_bar=True, logger=True)
-        self.log("test_acc", acc, on_step=True, prog_bar=True, logger=True)
+def train(dataloader, model, loss_fn, optimizer):
+    size = len(dataloader.dataset)
+    model.train()
+    for batch, (X, y) in enumerate(dataloader):
+        X, y = X.to(device), y.to(device)
+
+        pred = model(X)
+        loss = loss_fn(pred, y)
+
+        # backprop
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        #if batch % 5 == 0:
+        loss, current = loss.item(), batch * len(X)
+        print(f"loss: {loss:>7f} [{current:>5d}/{size:>5d}]")
+
+def test(dataloader, model, loss_fn):
+    size = len(dataloader.dataset)
+    num_batches = len(dataloader)
+    model.eval()
+    test_loss, correct = 0, 0
+    with torch.no_grad():
+        for X, y in dataloader:
+            X, y = X.to(device), y.to(device)
+            pred = model(X)
+            test_loss += loss_fn(pred, y).item()
+            correct += (pred.argmax(1) == y).type(torch.float).sum().item()
+    test_loss /= num_batches
+    correct /= size
+    print(
+        f"Test Error: \n Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>8f} \n"
+    )
+
+epochs = 20
+for t in range(epochs):
+    print(f"Epoch {t+1}\n------------------")
+    train(train_dataloader, model, criterion, optimizer)
+    test(test_dataloader, model, criterion)
+print("Done!")
 
 
-if __name__ == "__main__":
-    parser = ArgumentParser()
-    # Required arguments
-    parser.add_argument("model",
-                        help="""Choose one of the predefined ResNet models provided by torchvision. e.g. 50""",
-                        type=int)
-    parser.add_argument("num_classes", help="""Number of classes to be learned.""", type=int)
-    parser.add_argument("num_epochs", help="""Number of Epochs to Run.""", type=int)
-    parser.add_argument("train_set", help="""Path to training data folder.""", type=Path)
-    parser.add_argument("vld_set", help="""Path to validation set folder.""", type=Path)
-    # Optional arguments
-    parser.add_argument("-ts", "--test_set", help="""Optional test set path.""", type=Path)
-    parser.add_argument("-o", "--optimizer", help="""PyTorch optimizer to use. Defaults to adam.""", default='adam')
-    parser.add_argument("-lr", "--learning_rate", help="Adjust learning rate of optimizer.", type=float, default=1e-3)
-    parser.add_argument("-b", "--batch_size", help="""Manually determine batch size. Defaults to 16.""",
-                        type=int, default=16)
-    parser.add_argument("-tr", "--transfer",
-                        help="""Determine whether to use pretrained model or train from scratch. Defaults to True.""",
-                        action="store_true")
-    parser.add_argument("-to", "--tune_fc_only", help="Tune only the final, fully connected layers.", action="store_true")
-    parser.add_argument("-s", "--save_path", help="""Path to save model trained model checkpoint.""")
-    parser.add_argument("-g", "--gpus", help="""Enables GPU acceleration.""", type=int, default=None)
-    args = parser.parse_args()
-
-    # # Instantiate Model
-    model = ResNetClassifier(num_classes = args.num_classes, resnet_version = args.model,
-                            train_path = args.train_set,vld_path = args.vld_set, test_path = args.test_set,
-                            optimizer = args.optimizer, lr = args.learning_rate,
-                            batch_size = args.batch_size, transfer = args.transfer, tune_fc_only = args.tune_fc_only)
-    # Instantiate lightning trainer and train model
-    trainer_args = {'gpus': args.gpus, 'max_epochs': args.num_epochs}
-    trainer = pl.Trainer(**trainer_args)
-    trainer.fit(model)
-
-    trainer.test(model)
-    # Save trained model
-    # save_path = (args.save_path if args.save_path is not None else '/') + 'trained_model.ckpt'
-    # trainer.save_checkpoint(save_path)
+torch.save(model.state_dict(), "model.pth")
+print("Saved Pytorch Model State to model.pth")
