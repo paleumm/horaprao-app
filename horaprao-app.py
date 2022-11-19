@@ -1,7 +1,7 @@
 from PIL import Image
 from torchvision import transforms
 import torch
-from train import ResNetClassifier
+from ResNet import ResNet50
 import streamlit as st
 import torchvision.models as models
 
@@ -10,15 +10,18 @@ st.write("")
 
 image_up = st.file_uploader("Upload image. (jpg webp) ", type=["jpeg","jpg","webp"])
 
-PATH = 'horaprao-new.ckpt'
-IMAGE_SIZE = 500
+PATH = 'model.pth'
+IMAGE_SIZE = 224
 NUM_CLASSES = 2
 
 device = ('cuda' if torch.cuda.is_available() else 'cpu')
 
-model = ResNetClassifier(2, 50, 'input/train','input/val')
-# model = models.resnet50()
-model.load_from_checkpoint(PATH)
+model = ResNet50(num_classes=2)
+# Parameters of newly constructed modules have requires_grad=True by default
+num_ftrs = model.fc.in_features
+# model.fc = torch.nn.Linear(num_ftrs, 2)
+checkpoint = torch.load(PATH, map_location=device)
+model.load_state_dict(checkpoint, strict=False)
 model.eval()
 
 def predict(image):
@@ -50,14 +53,16 @@ if image_up is not None:
     image = Image.open(image_up).convert('RGB')
     st.image(image, caption = 'Uploaded Image.', use_column_width = True)
     st.write("")
-    st.write("Just a second ...")
+    # st.write("Just a second ...")
     labels = predict(image_up)
 
     # predicted class
     for i in labels:
         name = i[0].split()
-        st.write("Prediction ", name[1], ",   Score: ", i[1])
+        # st.write("Prediction ", name[1])
+        st.header(f"Prediction : {name[1]}")
+        # st.write("Prediction ", name[1], ",   Score: ", i[1])
     # st.write("Prediction (index, name)", labels[0][0], ",   Score: ", labels[0][1])
 
-st.header("Classes")
-st.dataframe(["horapa", "kapao"],600)
+# st.header("Classes")
+# st.dataframe(["horapa", "kapao"],600)
