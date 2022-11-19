@@ -2,4 +2,3 @@ Pillow
 torchvision
 torch
 torchsampler
-pytorch_lightning
