@@ -59,10 +59,4 @@ if image_up is not None:
     # predicted class
     for i in labels:
         name = i[0].split()
-        # st.write("Prediction ", name[1])
         st.header(f"Prediction : {name[1]}")
-        # st.write("Prediction ", name[1], ",   Score: ", i[1])
-    # st.write("Prediction (index, name)", labels[0][0], ",   Score: ", labels[0][1])
-
-# st.header("Classes")
-# st.dataframe(["horapa", "kapao"],600)

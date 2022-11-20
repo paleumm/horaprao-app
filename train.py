@@ -29,9 +29,11 @@ transform = transforms.Compose([
                 transforms.Normalize((0.48232,), (0.23051,))
         ])
 
+# datasets
 train_dataset = datasets.ImageFolder(root=train_path, transform=train_transform)
 test_dataset = datasets.ImageFolder(test_path, transform=transform)
 
+# DataLoader
 train_dataloader = torch.utils.data.DataLoader(
     train_dataset,
     sampler=ImbalancedDatasetSampler(train_dataset),
@@ -44,30 +46,34 @@ test_dataloader = torch.utils.data.DataLoader(
     batch_size=batch_size,
 )
 
+# Train on GPU if available
 device = "cuda" if torch.cuda.is_available() else "cpu"
-#device = 'cpu'
 print(f'using device : {device}')
 
+# Model ResNet50 with 2 Classes and transfer to device (GPU)
 model = ResNet50(num_classes=2).to(device)
-# print(model)
+print(model)
 
+# number of image in train dataset
 num_data = 643 + 424
 w_horapa = 643/num_data
 w_kapao = 424/num_data
+
+# class weighting
 class_weight = [w_horapa, w_kapao]
 class_weight = torch.FloatTensor(class_weight)
 
 # criterion
-# criterion = nn.BCEWithLogitsLoss(weight=class_weight)
 criterion = nn.CrossEntropyLoss(weight=class_weight).to(device)
 
 # optimizer
 optimizer = optim.Adam(model.parameters(), lr=lr)
+
 # scheduler
 gamma = 0.7
 scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
 
-
+# train function
 def train(dataloader, model, loss_fn, optimizer):
     size = len(dataloader.dataset)
     model.train()
@@ -82,10 +88,11 @@ def train(dataloader, model, loss_fn, optimizer):
         loss.backward()
         optimizer.step()
 
-        #if batch % 5 == 0:
+        # training log
         loss, current = loss.item(), batch * len(X)
         print(f"loss: {loss:>7f} [{current:>5d}/{size:>5d}]")
 
+# test function
 def test(dataloader, model, loss_fn):
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
@@ -99,10 +106,13 @@ def test(dataloader, model, loss_fn):
             correct += (pred.argmax(1) == y).type(torch.float).sum().item()
     test_loss /= num_batches
     correct /= size
+
+    # test log
     print(
         f"Test Error: \n Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>8f} \n"
     )
 
+# num epochs
 epochs = 20
 for t in range(epochs):
     print(f"Epoch {t+1}\n------------------")
@@ -110,6 +120,6 @@ for t in range(epochs):
     test(test_dataloader, model, criterion)
 print("Done!")
 
-
+# save model
 torch.save(model.state_dict(), "model.pth")
 print("Saved Pytorch Model State to model.pth")
